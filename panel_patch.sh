@@ -679,8 +679,16 @@ patch_project() {
   log "准备修改：$controller"
   backup_file "$controller"
 
-  local result
-  result=$(apply_patch_by_php "$panel" "$controller")
+  local result status
+  set +e
+  result=$(apply_patch_by_php "$panel" "$controller" 2>&1)
+  status=$?
+  set -e
+
+  if [ "$status" -ne 0 ]; then
+    fail "补丁执行失败：$result"
+  fi
+
   case "$result" in
     patched)
       log '补丁写入成功。'
