@@ -40,33 +40,26 @@ ask_yes_no() {
 }
 
 choose_panel() {
-  log ''
-  log '请选择要修改的面板：'
-  log '  1) XBoard'
-  log '  2) V2Board'
-  log '  3) 全部'
-  while true; do
-    printf '请输入序号 [1-3]: '
-    read -r choice || true
-    case "$choice" in
-      1) PANEL_CHOICE='xboard'; return ;;
-      2) PANEL_CHOICE='v2board'; return ;;
-      3) PANEL_CHOICE='all'; return ;;
-      *) log '输入无效，请重新输入。' ;;
-    esac
-  done
+  local menu_index
+  menu_index=$(choose_from_menu '请选择要修改的面板：'     'XBoard'     'V2Board')
+
+  case "$menu_index" in
+    0) PANEL_CHOICE='xboard' ;;
+    1) PANEL_CHOICE='v2board' ;;
+    *) fail '面板选择异常。' ;;
+  esac
 }
 
 collect_candidates() {
   local panel="$1"
   local marker='app/Http/Controllers/V1/Client/ClientController.php'
   local -a roots=(
-    "$PWD"
     "/www/wwwroot"
     "/www/server/panel/vhost"
     "/home/wwwroot"
-    "$HOME"
     "/data/wwwroot"
+    "$PWD"
+    "$HOME"
   )
   local result=''
   local root file base
@@ -81,12 +74,14 @@ collect_candidates() {
       case "$panel" in
         xboard)
           if [ -f "$base/app/Support/ProtocolManager.php" ]; then
-            result+="$base"$'\n'
+            result+="$base"$'
+'
           fi
           ;;
         v2board)
           if [ ! -f "$base/app/Support/ProtocolManager.php" ]; then
-            result+="$base"$'\n'
+            result+="$base"$'
+'
           fi
           ;;
       esac
@@ -96,37 +91,104 @@ collect_candidates() {
   printf '%s' "$result" | awk 'NF && !seen[$0]++'
 }
 
-choose_root() {
-  local panel="$1"
-  local candidates raw_count index selected
-  candidates=$(collect_candidates "$panel")
-  raw_count=$(printf '%s\n' "$candidates" | awk 'NF{count++} END{print count+0}')
+is_tty_interactive() {
+  [ -t 0 ] && [ -t 1 ]
+}
 
-  if [ "$raw_count" -gt 0 ]; then
+choose_from_menu() {
+  local title="$1"
+  shift
+  local options=("$@")
+  local count=${#options[@]}
+  local selected=0
+  local input extra index
+
+  [ "$count" -gt 0 ] || fail '菜单项不能为空。'
+
+  if ! is_tty_interactive; then
     log ''
-    log "检测到以下 ${panel} 目录："
-    index=1
-    while IFS= read -r line; do
-      [ -n "$line" ] || continue
-      log "  ${index}) ${line}"
-      index=$((index + 1))
-    done <<< "$candidates"
-    log "  ${index}) 手动输入路径"
-
+    log "$title"
+    for ((index = 0; index < count; index++)); do
+      log "  $((index + 1))) ${options[$index]}"
+    done
     while true; do
-      printf '请选择目录序号: '
-      read -r selected || true
-      if [[ "$selected" =~ ^[0-9]+$ ]]; then
-        if [ "$selected" -ge 1 ] && [ "$selected" -le "$raw_count" ]; then
-          ROOT_PATH=$(printf '%s\n' "$candidates" | awk 'NF' | sed -n "${selected}p")
-          return
-        fi
-        if [ "$selected" -eq "$index" ]; then
-          break
-        fi
+      printf '请输入序号 [1-%s]: ' "$count"
+      read -r input || true
+      if [[ "$input" =~ ^[0-9]+$ ]] && [ "$input" -ge 1 ] && [ "$input" -le "$count" ]; then
+        printf '%s
+' "$((input - 1))"
+        return
       fi
       log '输入无效，请重新输入。'
     done
+  fi
+
+  trap 'tput cnorm 2>/dev/null || true' RETURN
+  tput civis 2>/dev/null || true
+
+  while true; do
+    printf '[2J[H'
+    log "$title"
+    log '使用 ↑ ↓ 选择，回车确认。'
+    log ''
+
+    for ((index = 0; index < count; index++)); do
+      if [ "$index" -eq "$selected" ]; then
+        printf '> %s
+' "${options[$index]}"
+      else
+        printf '  %s
+' "${options[$index]}"
+      fi
+    done
+
+    IFS= read -rsn1 input || true
+    if [[ "$input" == $'' ]]; then
+      IFS= read -rsn2 extra || true
+      input+="$extra"
+    fi
+
+    case "$input" in
+      $'[A') selected=$(((selected - 1 + count) % count)) ;;
+      $'[B') selected=$(((selected + 1) % count)) ;;
+      ''|$'
+')
+        printf '[2J[H'
+        printf '%s
+' "$selected"
+        return
+        ;;
+    esac
+  done
+}
+
+format_candidate_label() {
+  local path="$1"
+  local name
+  name=$(basename "$path")
+  printf '%s (%s)' "$name" "$path"
+}
+
+choose_root() {
+  local panel="$1"
+  local selected_index path
+  local manual_label='手动输入路径'
+  local -a candidate_array=()
+  local -a option_array=()
+
+  mapfile -t candidate_array < <(collect_candidates "$panel")
+
+  if [ "${#candidate_array[@]}" -gt 0 ]; then
+    for path in "${candidate_array[@]}"; do
+      option_array+=("$(format_candidate_label "$path")")
+    done
+    option_array+=("$manual_label")
+
+    selected_index=$(choose_from_menu "检测到以下 ${panel} 目录：" "${option_array[@]}")
+    if [ "$selected_index" -lt "${#candidate_array[@]}" ]; then
+      ROOT_PATH="${candidate_array[$selected_index]}"
+      return
+    fi
   fi
 
   while true; do
@@ -648,21 +710,8 @@ patch_project() {
 main() {
   require_php
   choose_panel
-
-  local panel root
-  case "$PANEL_CHOICE" in
-    xboard|v2board)
-      choose_root "$PANEL_CHOICE"
-      patch_project "$PANEL_CHOICE" "$ROOT_PATH"
-      ;;
-    all)
-      for panel in xboard v2board; do
-        choose_root "$panel"
-        root="$ROOT_PATH"
-        patch_project "$panel" "$root"
-      done
-      ;;
-  esac
+  choose_root "$PANEL_CHOICE"
+  patch_project "$PANEL_CHOICE" "$ROOT_PATH"
 
   log ''
   log '处理完成。'
