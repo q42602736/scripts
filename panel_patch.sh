@@ -106,20 +106,23 @@ choose_from_menu() {
   [ "$count" -gt 0 ] || fail '菜单项不能为空。'
 
   if ! is_tty_interactive; then
-    log ''
-    log "$title"
+    printf '
+%s
+' "$title" >&2
     for ((index = 0; index < count; index++)); do
-      log "  $((index + 1))) ${options[$index]}"
+      printf '  %s) %s
+' "$((index + 1))" "${options[$index]}" >&2
     done
     while true; do
-      printf '请输入序号 [1-%s]: ' "$count"
+      printf '请输入序号 [1-%s]: ' "$count" >&2
       read -r input || true
       if [[ "$input" =~ ^[0-9]+$ ]] && [ "$input" -ge 1 ] && [ "$input" -le "$count" ]; then
         printf '%s
 ' "$((input - 1))"
         return
       fi
-      log '输入无效，请重新输入。'
+      printf '输入无效，请重新输入。
+' >&2
     done
   fi
 
@@ -127,18 +130,20 @@ choose_from_menu() {
   tput civis 2>/dev/null || true
 
   while true; do
-    printf '[2J[H'
-    log "$title"
-    log '使用 ↑ ↓ 选择，回车确认。'
-    log ''
+    printf '[2J[H' >&2
+    printf '%s
+' "$title" >&2
+    printf '使用 ↑ ↓ 选择，回车确认。
+
+' >&2
 
     for ((index = 0; index < count; index++)); do
       if [ "$index" -eq "$selected" ]; then
         printf '> %s
-' "${options[$index]}"
+' "${options[$index]}" >&2
       else
         printf '  %s
-' "${options[$index]}"
+' "${options[$index]}" >&2
       fi
     done
 
@@ -153,7 +158,7 @@ choose_from_menu() {
       $'[B') selected=$(((selected + 1) % count)) ;;
       ''|$'
 ')
-        printf '[2J[H'
+        printf '[2J[H' >&2
         printf '%s
 ' "$selected"
         return
