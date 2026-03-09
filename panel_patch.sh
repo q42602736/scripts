@@ -52,40 +52,29 @@ choose_panel() {
 
 collect_candidates() {
   local panel="$1"
-  local marker='app/Http/Controllers/V1/Client/ClientController.php'
-  local -a roots=(
-    "/www/wwwroot"
-    "/www/server/panel/vhost"
-    "/home/wwwroot"
-    "/data/wwwroot"
-    "$PWD"
-    "$HOME"
-  )
+  local root="/www/wwwroot"
   local result=''
-  local root file base
+  local dir
 
-  for root in "${roots[@]}"; do
-    [ -d "$root" ] || continue
-    while IFS= read -r file; do
-      [ -n "$file" ] || continue
-      base=${file%/$marker}
-      [ -f "$base/artisan" ] || continue
-      [ -f "$base/app/Protocols/ClashMeta.php" ] || continue
-      case "$panel" in
-        xboard)
-          if [ -f "$base/app/Support/ProtocolManager.php" ]; then
-            result+="$base"$'
+  [ -d "$root" ] || return 0
+
+  for dir in "$root"/*; do
+    [ -d "$dir" ] || continue
+    [ -f "$dir/artisan" ] || continue
+    [ -f "$dir/app/Http/Controllers/V1/Client/ClientController.php" ] || continue
+    [ -f "$dir/app/Protocols/ClashMeta.php" ] || continue
+
+    case "$panel" in
+      xboard)
+        [ -f "$dir/app/Support/ProtocolManager.php" ] || continue
+        ;;
+      v2board)
+        [ ! -f "$dir/app/Support/ProtocolManager.php" ] || continue
+        ;;
+    esac
+
+    result+="$dir"$'
 '
-          fi
-          ;;
-        v2board)
-          if [ ! -f "$base/app/Support/ProtocolManager.php" ]; then
-            result+="$base"$'
-'
-          fi
-          ;;
-      esac
-    done < <(find "$root" -maxdepth 5 -type f -path "*/$marker" 2>/dev/null)
   done
 
   printf '%s' "$result" | awk 'NF && !seen[$0]++'
