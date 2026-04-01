@@ -134,7 +134,8 @@ validate_sspanel_root() {
   local root="$1"
   [ -f "$root/bootstrap.php" ] &&
     [ -f "$root/app/Utils/URL.php" ] &&
-    [ -f "$root/resources/views/malio/user/node.tpl" ]
+    [ -f "$root/app/Controllers/UserController.php" ] &&
+    [ -f "$root/app/Controllers/VueController.php" ]
 }
 
 validate_root_for_panel() {
@@ -180,7 +181,7 @@ prompt_root_error() {
       log '目标目录需包含 artisan、app/Http/Controllers/V1/Client/ClientController.php、app/Protocols/ClashMeta.php。'
       ;;
     sspanel-malio)
-      log '目标目录需包含 bootstrap.php、app/Utils/URL.php、resources/views/malio/user/node.tpl。'
+      log '目标目录需包含 bootstrap.php、app/Utils/URL.php、app/Controllers/UserController.php、app/Controllers/VueController.php。'
       ;;
   esac
 }
@@ -232,7 +233,7 @@ apply_patch_by_php() {
   local target="$2"
   local file="$3"
 
-  php - "$panel" "$target" "$file" <<'PHP'
+  php /dev/stdin "$panel" "$target" "$file" <<'PHP'
 <?php
 $panel = $argv[1] ?? '';
 $target = $argv[2] ?? '';
@@ -641,8 +642,8 @@ CODE,
     exit(0);
 }
 
-if ($panel === 'sspanel-malio' && $target === 'url') {
-    if (strpos($code, 'private const EXCLUSIVE_CLIENT_FLAGS') !== false && strpos($code, 'shouldKeepNodeForClient') !== false) {
+if ($panel === 'sspanel-malio' && $target === 'user_controller') {
+    if (substr_count($code, "strpos((string) (\$node->info ?? ''), '客服端专用') !== false") >= 2) {
         echo "already_patched\n";
         exit(0);
     }
@@ -650,36 +651,152 @@ if ($panel === 'sspanel-malio' && $target === 'url') {
     $code = replace_once_or_fail(
         $code,
         <<<'CODE'
+        foreach ($nodes as $node) {
+            if ($user->is_admin == 0 && $node->node_group != $user->node_group && $node->node_group != 0) {
+                continue;
+            }
+            if ($node->sort == 9) {
+CODE,
+        <<<'CODE'
+        foreach ($nodes as $node) {
+            if ($user->is_admin == 0 && $node->node_group != $user->node_group && $node->node_group != 0) {
+                continue;
+            }
+            if (
+                strpos((string) ($node->info ?? ''), '客服端专用') !== false ||
+                strpos((string) ($node->status ?? ''), '客服端专用') !== false
+            ) {
+                continue;
+            }
+            if ($node->sort == 9) {
+CODE,
+        'sspanel-user-controller-node-loop'
+    );
+
+    $code = replace_once_or_fail(
+        $code,
+        <<<'CODE'
+        foreach ($nodes as $node) {
+            if (($user->node_group == $node->node_group || $node->node_group == 0 || $user->is_admin) && (!$node->isNodeTrafficOut())) {
+                if ($node->sort == 9) {
+CODE,
+        <<<'CODE'
+        foreach ($nodes as $node) {
+            if (($user->node_group == $node->node_group || $node->node_group == 0 || $user->is_admin) && (!$node->isNodeTrafficOut())) {
+                if (
+                    strpos((string) ($node->info ?? ''), '客服端专用') !== false ||
+                    strpos((string) ($node->status ?? ''), '客服端专用') !== false
+                ) {
+                    continue;
+                }
+                if ($node->sort == 9) {
+CODE,
+        'sspanel-user-controller-prefix-loop'
+    );
+
+    file_put_contents($file, $code);
+    echo "patched\n";
+    exit(0);
+}
+
+if ($panel === 'sspanel-malio' && $target === 'vue_controller') {
+    if (strpos($code, "strpos((string) (\$node->info ?? ''), '客服端专用') !== false") !== false) {
+        echo "already_patched\n";
+        exit(0);
+    }
+
+    $code = replace_once_or_fail(
+        $code,
+        <<<'CODE'
+        foreach ($nodes as $node) {
+            if ($node->node_group != $user->node_group && $node->node_group != 0) {
+                continue;
+            }
+            if ($node->sort == 9) {
+CODE,
+        <<<'CODE'
+        foreach ($nodes as $node) {
+            if ($node->node_group != $user->node_group && $node->node_group != 0) {
+                continue;
+            }
+            if (
+                strpos((string) ($node->info ?? ''), '客服端专用') !== false ||
+                strpos((string) ($node->status ?? ''), '客服端专用') !== false
+            ) {
+                continue;
+            }
+            if ($node->sort == 9) {
+CODE,
+        'sspanel-vue-controller-node-loop'
+    );
+
+    file_put_contents($file, $code);
+    echo "patched\n";
+    exit(0);
+}
+
+if ($panel === 'sspanel-malio' && $target === 'url') {
+    if (
+        strpos($code, 'private static function shouldKeepNodeForClient($node, $userAgent)') !== false &&
+        strpos($code, "case 'vless':") !== false &&
+        strpos($code, "case 'hysteria2':") !== false &&
+        strpos($code, 'public static function getVlessItem') !== false &&
+        strpos($code, 'public static function getHy2Item') !== false
+    ) {
+        echo "already_patched\n";
+        exit(0);
+    }
+
+    if (strpos($code, 'private const EXCLUSIVE_CLIENT_FLAGS') === false) {
+        $code = replace_once_or_fail(
+            $code,
+            <<<'CODE'
 class URL
 {
     /*
 CODE,
-        <<<'CODE'
+            <<<'CODE'
 class URL
 {
     /**
-     * 专用客户端标识
+     * 专用客户端 UA 标识
      */
     private const EXCLUSIVE_CLIENT_FLAGS = [
         'xboardmihomo',
     ];
 
     /**
-     * 专用节点标记关键字
+     * 专用节点关键字
      */
     private const EXCLUSIVE_NODE_KEYWORD = '客服端专用';
 
     /*
 CODE,
-        'sspanel-url-class-header'
-    );
+            'sspanel-url-class-header'
+        );
+    }
 
-    $code = replace_once_or_fail(
-        $code,
-        <<<'CODE'
-    public static function getNew_AllItems($user, $Rule)
+    if (strpos($code, "\$userAgent = strtolower(\$_SERVER['HTTP_USER_AGENT'] ?? '');") === false) {
+        $code = replace_once_or_fail(
+            $code,
+            <<<'CODE'
+        //         'regex'   => '.*香港.*HKBN.*',
+        //     ]
+        // ];
+        $is_mu = $Rule['is_mu'];
 CODE,
-        <<<'CODE'
+            <<<'CODE'
+        //         'regex'   => '.*香港.*HKBN.*',
+        //     ]
+        // ];
+        $userAgent = strtolower($_SERVER['HTTP_USER_AGENT'] ?? '');
+        $is_mu = $Rule['is_mu'];
+CODE,
+            'sspanel-url-user-agent'
+        );
+    }
+
+    $oldHelperBlock = <<<'CODE'
     private static function isExclusiveClientRequest()
     {
         $userAgent = strtolower($_SERVER['HTTP_USER_AGENT'] ?? '');
@@ -716,17 +833,164 @@ CODE,
     }
 
     public static function getNew_AllItems($user, $Rule)
+CODE;
+
+    $newHelperBlock = <<<'CODE'
+    /**
+     * 判断是否为专用客户端请求
+     *
+     * @param string $userAgent
+     *
+     * @return bool
+     */
+    private static function isExclusiveClientRequest($userAgent)
+    {
+        foreach (self::EXCLUSIVE_CLIENT_FLAGS as $flag) {
+            if ($flag !== '' && strpos($userAgent, strtolower($flag)) !== false) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    /**
+     * 判断字段是否包含专用节点关键字
+     *
+     * 只看节点描述（info）和节点状态（status），不再依赖节点名称。
+     *
+     * @param mixed $value
+     *
+     * @return bool
+     */
+    private static function containsExclusiveKeyword($value)
+    {
+        if (!is_string($value) || $value === '') {
+            return false;
+        }
+        return strpos($value, self::EXCLUSIVE_NODE_KEYWORD) !== false;
+    }
+
+    /**
+     * 判断是否为专用节点
+     *
+     * @param Node $node
+     *
+     * @return bool
+     */
+    private static function isExclusiveNode($node)
+    {
+        return self::containsExclusiveKeyword($node->info ?? '')
+            || self::containsExclusiveKeyword($node->status ?? '');
+    }
+
+    /**
+     * 根据客户端类型决定是否保留节点
+     *
+     * @param Node   $node
+     * @param string $userAgent
+     *
+     * @return bool
+     */
+    private static function shouldKeepNodeForClient($node, $userAgent)
+    {
+        $isExclusiveNode = self::isExclusiveNode($node);
+        if (self::isExclusiveClientRequest($userAgent)) {
+            return $isExclusiveNode;
+        }
+        return !$isExclusiveNode;
+    }
+
+    public static function getNew_AllItems($user, $Rule)
+CODE;
+
+    if (strpos($code, 'private static function shouldKeepNodeForClient($node, $userAgent)') === false) {
+        if (strpos($code, $oldHelperBlock) !== false) {
+            $code = replace_once_or_fail(
+                $code,
+                $oldHelperBlock,
+                $newHelperBlock,
+                'sspanel-url-helper-methods-upgrade'
+            );
+        } else {
+            $code = replace_once_or_fail(
+                $code,
+                <<<'CODE'
+    public static function getNew_AllItems($user, $Rule)
 CODE,
-        'sspanel-url-helper-methods'
-    );
+                $newHelperBlock,
+                'sspanel-url-helper-methods'
+            );
+        }
+    }
+
+    if (strpos($code, "case 'vless':") === false || strpos($code, "case 'hysteria2':") === false) {
+        $code = replace_once_or_fail(
+            $code,
+            <<<'CODE'
+            case 'trojan':
+                $sort = [14];
+                break;
+            default:
+                $Rule['type'] = 'all';
+                $sort = [0, 10, 11, 12, 13, 14];
+                break;
+CODE,
+            <<<'CODE'
+            case 'trojan':
+                $sort = [14];
+                break;
+            case 'vless':
+                $sort = [15, 16];
+                break;
+            case 'hysteria2':
+                $sort = [17];
+                break;
+            default:
+                $Rule['type'] = 'all';
+                $sort = [0, 10, 11, 12, 13, 14, 15, 16, 17];
+                break;
+CODE,
+            'sspanel-url-sort-switch'
+        );
+    }
 
     $code = replace_once_or_fail(
         $code,
         <<<'CODE'
-            foreach ($nodes as $node) {
-                if (in_array($node->sort, [13]) && (($Rule['type'] == 'all' && $x == 0) || ($Rule['type'] == 'ss'))) {
+        if ($is_mu != 0 && $Rule['type'] != 'vmess' && $Rule['type'] != 'trojan') {
 CODE,
         <<<'CODE'
+        if ($is_mu != 0 && $Rule['type'] != 'vmess' && $Rule['type'] != 'trojan' && $Rule['type'] != 'vless' && $Rule['type'] != 'hysteria2') {
+CODE,
+        'sspanel-url-mu-condition'
+    );
+
+    if (
+        strpos($code, '!self::shouldKeepNodeForClient($node, $userAgent))') === false &&
+        strpos($code, '!self::shouldKeepNodeForClient($node))') === false
+    ) {
+        $code = replace_once_or_fail(
+            $code,
+            <<<'CODE'
+            foreach ($nodes as $node) {
+                if (in_array($node->sort, [13]) && (($Rule['type'] == 'all' && $x == 0) || ($Rule['type'] != 'all'))) {
+CODE,
+            <<<'CODE'
+            foreach ($nodes as $node) {
+                if (!self::shouldKeepNodeForClient($node, $userAgent)) {
+                    continue;
+                }
+
+                if (in_array($node->sort, [13]) && (($Rule['type'] == 'all' && $x == 0) || ($Rule['type'] == 'ss'))) {
+CODE,
+            'sspanel-url-node-loop-stock'
+        );
+    }
+
+    if (strpos($code, '!self::shouldKeepNodeForClient($node))') !== false) {
+        $code = replace_once_or_fail(
+            $code,
+            <<<'CODE'
             foreach ($nodes as $node) {
                 if (!self::shouldKeepNodeForClient($node)) {
                     continue;
@@ -734,90 +998,185 @@ CODE,
 
                 if (in_array($node->sort, [13]) && (($Rule['type'] == 'all' && $x == 0) || ($Rule['type'] == 'ss'))) {
 CODE,
-        'sspanel-url-node-loop'
-    );
+            <<<'CODE'
+            foreach ($nodes as $node) {
+                if (!self::shouldKeepNodeForClient($node, $userAgent)) {
+                    continue;
+                }
 
-    file_put_contents($file, $code);
-    echo "patched\n";
-    exit(0);
-}
-
-if ($panel === 'sspanel-malio' && $target === 'node_tpl') {
-    if (strpos($code, 'data-xboard-exclusive') !== false && strpos($code, 'xboard-exclusive-badge') !== false) {
-        echo "already_patched\n";
-        exit(0);
+                if (in_array($node->sort, [13]) && (($Rule['type'] == 'all' && $x == 0) || ($Rule['type'] == 'ss'))) {
+CODE,
+            'sspanel-url-node-loop-upgrade'
+        );
     }
 
     $code = replace_once_or_fail(
         $code,
         <<<'CODE'
-    .card-body .rounded-circle {
-      box-shadow: 0 2px 6px #e6ecf1;
+                if (in_array($node->sort, [11, 12]) && (($Rule['type'] == 'all' && $x == 0) || ($Rule['type'] != 'all'))) {
+CODE,
+        <<<'CODE'
+                if (in_array($node->sort, [11, 12]) && (($Rule['type'] == 'all' && $x == 0) || ($Rule['type'] == 'vmess'))) {
+CODE,
+        'sspanel-url-vmess-condition'
+    );
+
+    if (strpos($code, "if (in_array(\$node->sort, [15, 16])") === false) {
+        $code = replace_once_or_fail(
+            $code,
+            <<<'CODE'
+                if (in_array($node->sort, [14]) && (($Rule['type'] == 'all' && $x == 0) || ($Rule['type'] == 'trojan'))) {
+                    // Trojan
+                    $item = self::getTrojanItem($user, $node, $emoji);
+                    if ($item != null) {
+                        $find = (isset($Rule['content']['regex']) && $Rule['content']['regex'] != '' ? ConfController::getMatchProxy($item, ['content' => ['regex' => $Rule['content']['regex']]]) : true);
+                        if ($find) {
+                            $return_array[] = $item;
+                        }
+                    }
+                    continue;
+                }
+                if (in_array($node->sort, [0, 10]) && $node->mu_only != 1 && ($is_mu == 0 || ($is_mu != 0 && Config::get('mergeSub') === true))) {
+CODE,
+            <<<'CODE'
+                if (in_array($node->sort, [14]) && (($Rule['type'] == 'all' && $x == 0) || ($Rule['type'] == 'trojan'))) {
+                    // Trojan
+                    $item = self::getTrojanItem($user, $node, $emoji);
+                    if ($item != null) {
+                        $find = (isset($Rule['content']['regex']) && $Rule['content']['regex'] != '' ? ConfController::getMatchProxy($item, ['content' => ['regex' => $Rule['content']['regex']]]) : true);
+                        if ($find) {
+                            $return_array[] = $item;
+                        }
+                    }
+                    continue;
+                }
+                if (in_array($node->sort, [15, 16]) && (($Rule['type'] == 'all' && $x == 0) || ($Rule['type'] == 'vless'))) {
+                    // VLESS
+                    $item = self::getVlessItem($user, $node, $emoji);
+                    if ($item != null) {
+                        $find = (isset($Rule['content']['regex']) && $Rule['content']['regex'] != '' ? ConfController::getMatchProxy($item, ['content' => ['regex' => $Rule['content']['regex']]]) : true);
+                        if ($find) {
+                            $return_array[] = $item;
+                        }
+                    }
+                    continue;
+                }
+                if (in_array($node->sort, [17]) && (($Rule['type'] == 'all' && $x == 0) || ($Rule['type'] == 'hysteria2'))) {
+                    // Hysteria2
+                    $item = self::getHy2Item($user, $node, $emoji);
+                    if ($item != null) {
+                        $find = (isset($Rule['content']['regex']) && $Rule['content']['regex'] != '' ? ConfController::getMatchProxy($item, ['content' => ['regex' => $Rule['content']['regex']]]) : true);
+                        if ($find) {
+                            $return_array[] = $item;
+                        }
+                    }
+                    continue;
+                }
+                if (in_array($node->sort, [0, 10]) && $node->mu_only != 1 && ($is_mu == 0 || ($is_mu != 0 && Config::get('mergeSub') === true))) {
+CODE,
+            'sspanel-url-insert-new-types'
+        );
     }
-  </style>
+
+    if (strpos($code, 'public static function getVlessItem') === false) {
+        $code = replace_once_or_fail(
+            $code,
+            <<<'CODE'
+    
+    public static function getAllUrl($user, $is_mu, $is_ss = 0, $getV2rayPlugin = 1)
 CODE,
-        <<<'CODE'
-    .card-body .rounded-circle {
-      box-shadow: 0 2px 6px #e6ecf1;
+            <<<'CODE'
+
+    /**
+     * VLESS 节点
+     *
+     * @param User $user 用户
+     * @param Node $node
+     * @param bool $emoji
+     *
+     * @return array
+     */
+    public static function getVlessItem($user, $node, $emoji = false)
+    {
+        $server = explode(';', $node->server);
+        $opt = [];
+        if (isset($server[1])) {
+            parse_str($server[1], $opt);
+        }
+
+        $item['remark'] = ($emoji == true ? Tools::addEmoji($node->name) : $node->name);
+        $item['type'] = 'vless';
+        $item['address'] = $server[0];
+        $item['port'] = (isset($opt['port']) ? (int) $opt['port'] : 443);
+        $item['uuid'] = $user->uuid;
+        $item['flow'] = (isset($opt['flow']) ? $opt['flow'] : '');
+
+        if (isset($opt['security']) && $opt['security'] == 'reality') {
+            $destHost = (isset($opt['dest']) ? $opt['dest'] : '');
+            $destPort = (isset($opt['serverPort']) ? $opt['serverPort'] : '');
+            $item['security'] = 'reality';
+            $item['reality'] = [
+                'dest' => ($destPort !== '' ? $destHost . ':' . $destPort : $destHost),
+                'server_name' => (isset($opt['serverName']) ? $opt['serverName'] : ''),
+                'private_key' => (isset($opt['privateKey']) ? $opt['privateKey'] : ''),
+                'public_key' => (isset($opt['publicKey']) ? $opt['publicKey'] : ''),
+                'short_id' => (isset($opt['shortId']) ? $opt['shortId'] : ''),
+            ];
+        } else {
+            $item['security'] = 'none';
+            $item['reality'] = [
+                'dest' => '',
+                'server_name' => '',
+                'private_key' => '',
+                'public_key' => '',
+                'short_id' => '',
+            ];
+        }
+
+        return $item;
     }
 
-    .xboard-exclusive-badge {
-      display: inline-flex;
-      align-items: center;
-      margin-top: 6px;
-      padding: 2px 8px;
-      border-radius: 999px;
-      font-size: 12px;
-      line-height: 1.4;
-      color: #fff;
-      background: linear-gradient(135deg, #ff9800, #f57c00);
+    /**
+     * Hysteria2 节点
+     *
+     * @param User $user 用户
+     * @param Node $node
+     * @param bool $emoji
+     *
+     * @return array
+     */
+    public static function getHy2Item($user, $node, $emoji = false)
+    {
+        $server = explode(';', $node->server);
+        $opt = [];
+        if (isset($server[1])) {
+            parse_str($server[1], $opt);
+        }
+
+        $item['remark'] = ($emoji == true ? Tools::addEmoji($node->name) : $node->name);
+        $item['type'] = 'hysteria2';
+        $item['address'] = $server[0];
+        $item['port'] = (isset($opt['port']) ? (int) $opt['port'] : 443);
+        $item['password'] = $user->uuid;
+        $item['up_mbps'] = (isset($opt['up_mbps']) ? (int) $opt['up_mbps'] : 100);
+        $item['down_mbps'] = (isset($opt['down_mbps']) ? (int) $opt['down_mbps'] : 100);
+        $item['obfs_type'] = (isset($opt['obfs']) ? $opt['obfs'] : 'plain');
+        $item['obfs_password'] = (isset($opt['obfs_password']) ? $opt['obfs_password'] : '');
+        $item['ignore_client_bandwidth'] = (isset($opt['ignore_client_bandwidth']) ? (bool) $opt['ignore_client_bandwidth'] : false);
+        $item['allow_insecure'] = (isset($opt['allow_insecure']) ? (bool) $opt['allow_insecure'] : false);
+        $item['class'] = $node->node_class;
+        $item['group'] = Config::get('appName');
+        $item['ratio'] = $node->traffic_rate;
+
+        return $item;
     }
-  </style>
-CODE,
-        'sspanel-node-style'
-    );
 
-    $code = replace_once_or_fail(
-        $code,
-        <<<'CODE'
-                <div class="card" {if $user->class>0} data-toggle="modal" data-target="#node-modal-{$node['id']}"{/if}>
+    
+    public static function getAllUrl($user, $is_mu, $is_ss = 0, $getV2rayPlugin = 1)
 CODE,
-        <<<'CODE'
-                <div class="card"{if strpos($node['info'], '客服端专用') !== false || strpos($node['name'], '客服端专用') !== false || strpos($node['status'], '客服端专用') !== false} data-xboard-exclusive="1"{/if} {if $user->class>0} data-toggle="modal" data-target="#node-modal-{$node['id']}"{/if}>
-CODE,
-        'sspanel-node-card-modal'
-    );
-
-    $code = replace_once_or_fail(
-        $code,
-        <<<'CODE'
-                  <div class="card" {if $user->class >0}onclick="urlChange('{$node['id']}',0,{if $relay_rule != null}{$relay_rule->id}{else}0{/if})"{/if}>
-CODE,
-        <<<'CODE'
-                  <div class="card"{if strpos($node['info'], '客服端专用') !== false || strpos($node['name'], '客服端专用') !== false || strpos($node['status'], '客服端专用') !== false} data-xboard-exclusive="1"{/if} {if $user->class >0}onclick="urlChange('{$node['id']}',0,{if $relay_rule != null}{$relay_rule->id}{else}0{/if})"{/if}>
-CODE,
-        'sspanel-node-card-click'
-    );
-
-    $code = replace_once_or_fail(
-        $code,
-        <<<'CODE'
-                          <div class="media-body">
-                            <div class="media-title node-status {if $node['online']=='1' or $node['sort'] == 14}node-is-online{else}node-is-offline{/if}">{current(explode(" - ", $node['name']))}</div>
-                            <div class=" text-job text-muted">{$node['info']}</div>
-                          </div>
-CODE,
-        <<<'CODE'
-                          <div class="media-body"{if strpos($node['info'], '客服端专用') !== false || strpos($node['name'], '客服端专用') !== false || strpos($node['status'], '客服端专用') !== false} data-xboard-exclusive="1"{/if}>
-                            <div class="media-title node-status {if $node['online']=='1' or $node['sort'] == 14}node-is-online{else}node-is-offline{/if}">{current(explode(" - ", $node['name']))}</div>
-                            {if strpos($node['info'], '客服端专用') !== false || strpos($node['name'], '客服端专用') !== false || strpos($node['status'], '客服端专用') !== false}
-                            <div class="xboard-exclusive-badge" data-xboard-exclusive="1">客服端专用</div>
-                            {/if}
-                            <div class=" text-job text-muted">{$node['info']}</div>
-                          </div>
-CODE,
-        'sspanel-node-media-body'
-    );
+            'sspanel-url-insert-methods'
+        );
+    }
 
     file_put_contents($file, $code);
     echo "patched\n";
@@ -912,8 +1271,9 @@ patch_project() {
       fi
       ;;
     sspanel-malio)
+      patch_single_file "$panel" 'user_controller' "$root/app/Controllers/UserController.php"
+      patch_single_file "$panel" 'vue_controller' "$root/app/Controllers/VueController.php"
       patch_single_file "$panel" 'url' "$root/app/Utils/URL.php"
-      patch_single_file "$panel" 'node_tpl' "$root/resources/views/malio/user/node.tpl"
       if ask_yes_no '是否立即清理 SSPanel 模板与订阅缓存？' 'y'; then
         clear_sspanel_cache "$root"
       fi
