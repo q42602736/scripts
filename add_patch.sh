@@ -340,6 +340,22 @@ function replace_once_or_fail(string $code, string $search, string $replace, str
     exit(2);
 }
 
+function insert_before_last_class_brace_or_fail(string $code, string $insert, string $label): string
+{
+    if (!preg_match('/\}\s*$/s', $code, $matches, PREG_OFFSET_CAPTURE)) {
+        fwrite(STDERR, "未找到类结束位置：{$label}\n");
+        exit(2);
+    }
+
+    $newline = strpos($code, "\r\n") !== false ? "\r\n" : "\n";
+    $pos = $matches[0][1];
+    $prefix = rtrim(substr($code, 0, $pos), "\r\n");
+    $suffix = substr($code, $pos);
+    $insert = str_replace(["\r\n", "\n"], $newline, trim($insert, "\r\n"));
+
+    return $prefix . $newline . $newline . $insert . $newline . $suffix;
+}
+
 if ($panel === 'v2board' && $feature === 'group_plan_limit' && $target === 'plan_controller') {
     if (
         strpos($code, 'private const USER_OLD_AFTER_MINUTES') !== false &&
@@ -429,21 +445,9 @@ CODE,
         'v2board-plan-list-filter'
     );
 
-    $code = replace_once_or_fail(
+    $code = insert_before_last_class_brace_or_fail(
         $code,
         <<<'CODE'
-        return response([
-            'data' => $plans
-        ]);
-    }
-}
-CODE,
-        <<<'CODE'
-        return response([
-            'data' => $plans
-        ]);
-    }
-
     private function getAllowedGroupId(User $user): int
     {
         $oldAfterMinutes = max(self::USER_OLD_AFTER_MINUTES, 0);
@@ -457,7 +461,6 @@ CODE,
         $cutoffTimestamp = time() - ($oldAfterMinutes * 60);
         return (int) $user->created_at <= $cutoffTimestamp ? $oldUserGroupId : $newUserGroupId;
     }
-}
 CODE,
         'v2board-plan-helper-method'
     );
@@ -526,17 +529,9 @@ CODE,
         'v2board-order-group-check'
     );
 
-    $code = replace_once_or_fail(
+    $code = insert_before_last_class_brace_or_fail(
         $code,
         <<<'CODE'
-        return $add;
-    }
-}
-CODE,
-        <<<'CODE'
-        return $add;
-    }
-
     private function getAllowedGroupId(User $user): int
     {
         $oldAfterMinutes = max(self::USER_OLD_AFTER_MINUTES, 0);
@@ -550,7 +545,6 @@ CODE,
         $cutoffTimestamp = time() - ($oldAfterMinutes * 60);
         return (int) $user->created_at <= $cutoffTimestamp ? $oldUserGroupId : $newUserGroupId;
     }
-}
 CODE,
         'v2board-order-helper-method'
     );
