@@ -357,23 +357,40 @@ function insert_before_last_class_brace_or_fail(string $code, string $insert, st
 }
 
 if ($panel === 'v2board' && $feature === 'group_plan_limit' && $target === 'plan_controller') {
+    $hasPlanDetailNoCache = strpos($code, <<<'CODE'
+            ])->header('Cache-Control', 'private, no-store, no-cache, must-revalidate, max-age=0')
+                ->header('Pragma', 'no-cache')
+                ->header('Expires', '0')
+                ->header('Vary', 'Authorization');
+CODE) !== false;
+
+    $hasPlanListNoCache = strpos($code, <<<'CODE'
+        ])->header('Cache-Control', 'private, no-store, no-cache, must-revalidate, max-age=0')
+            ->header('Pragma', 'no-cache')
+            ->header('Expires', '0')
+            ->header('Vary', 'Authorization');
+CODE) !== false;
+
     if (
         strpos($code, 'private const USER_OLD_AFTER_MINUTES') !== false &&
         strpos($code, "->where('group_id', \$allowedGroupId)") !== false &&
-        strpos($code, 'private function getAllowedGroupId(User $user): int') !== false
+        strpos($code, 'private function getAllowedGroupId(User $user): int') !== false &&
+        $hasPlanDetailNoCache &&
+        $hasPlanListNoCache
     ) {
         echo "already_patched\n";
         exit(0);
     }
 
-    $code = replace_once_or_fail(
-        $code,
-        <<<'CODE'
+    if (strpos($code, 'private const USER_OLD_AFTER_MINUTES') === false) {
+        $code = replace_once_or_fail(
+            $code,
+            <<<'CODE'
 class PlanController extends Controller
 {
     public function fetch(Request $request)
 CODE,
-        strtr(<<<'CODE'
+            strtr(<<<'CODE'
 class PlanController extends Controller
 {
     // 注册满多少分钟后视为老用户，可自行修改
@@ -385,16 +402,18 @@ class PlanController extends Controller
 
     public function fetch(Request $request)
 CODE, $placeholderReplacements),
-        'v2board-plan-class-header'
-    );
+            'v2board-plan-class-header'
+        );
+    }
 
-    $code = replace_once_or_fail(
-        $code,
-        <<<'CODE'
+    if (strpos($code, '$allowedGroupId = $this->getAllowedGroupId($user);') === false) {
+        $code = replace_once_or_fail(
+            $code,
+            <<<'CODE'
         $user = User::find($request->user['id']);
         if ($request->input('id')) {
 CODE,
-        <<<'CODE'
+            <<<'CODE'
         $user = User::find($request->user['id']);
         if (!$user) {
             abort(500, __('The user does not exist'));
@@ -402,12 +421,14 @@ CODE,
         $allowedGroupId = $this->getAllowedGroupId($user);
         if ($request->input('id')) {
 CODE,
-        'v2board-plan-fetch-user'
-    );
+            'v2board-plan-fetch-user'
+        );
+    }
 
-    $code = replace_once_or_fail(
-        $code,
-        <<<'CODE'
+    if (strpos($code, 'if ((int)$plan->group_id !== $allowedGroupId) {') === false) {
+        $code = replace_once_or_fail(
+            $code,
+            <<<'CODE'
             if (!$plan) {
                 abort(500, __('Subscription plan does not exist'));
             }
@@ -415,7 +436,7 @@ CODE,
                 abort(500, __('Subscription plan does not exist'));
             }
 CODE,
-        <<<'CODE'
+            <<<'CODE'
             if (!$plan) {
                 abort(500, __('Subscription plan does not exist'));
             }
@@ -426,28 +447,72 @@ CODE,
                 abort(500, __('Subscription plan does not exist'));
             }
 CODE,
-        'v2board-plan-detail-group-check'
-    );
+            'v2board-plan-detail-group-check'
+        );
+    }
 
-    $code = replace_once_or_fail(
-        $code,
-        <<<'CODE'
+    if (strpos($code, "->where('group_id', \$allowedGroupId)") === false) {
+        $code = replace_once_or_fail(
+            $code,
+            <<<'CODE'
         $plans = Plan::where('show', 1)
             ->orderBy('sort', 'ASC')
             ->get();
 CODE,
-        <<<'CODE'
+            <<<'CODE'
         $plans = Plan::where('show', 1)
             ->where('group_id', $allowedGroupId)
             ->orderBy('sort', 'ASC')
             ->get();
 CODE,
-        'v2board-plan-list-filter'
-    );
+            'v2board-plan-list-filter'
+        );
+    }
 
-    $code = insert_before_last_class_brace_or_fail(
-        $code,
-        <<<'CODE'
+    if (!$hasPlanDetailNoCache) {
+        $code = replace_once_or_fail(
+            $code,
+            <<<'CODE'
+            return response([
+                'data' => $plan
+            ]);
+CODE,
+            <<<'CODE'
+            return response([
+                'data' => $plan
+            ])->header('Cache-Control', 'private, no-store, no-cache, must-revalidate, max-age=0')
+                ->header('Pragma', 'no-cache')
+                ->header('Expires', '0')
+                ->header('Vary', 'Authorization');
+CODE,
+            'v2board-plan-detail-no-cache'
+        );
+    }
+
+    if (!$hasPlanListNoCache) {
+        $code = replace_once_or_fail(
+            $code,
+            <<<'CODE'
+        return response([
+            'data' => $plans
+        ]);
+CODE,
+            <<<'CODE'
+        return response([
+            'data' => $plans
+        ])->header('Cache-Control', 'private, no-store, no-cache, must-revalidate, max-age=0')
+            ->header('Pragma', 'no-cache')
+            ->header('Expires', '0')
+            ->header('Vary', 'Authorization');
+CODE,
+            'v2board-plan-list-no-cache'
+        );
+    }
+
+    if (strpos($code, 'private function getAllowedGroupId(User $user): int') === false) {
+        $code = insert_before_last_class_brace_or_fail(
+            $code,
+            <<<'CODE'
     private function getAllowedGroupId(User $user): int
     {
         $oldAfterMinutes = max(self::USER_OLD_AFTER_MINUTES, 0);
@@ -462,8 +527,9 @@ CODE,
         return (int) $user->created_at <= $cutoffTimestamp ? $oldUserGroupId : $newUserGroupId;
     }
 CODE,
-        'v2board-plan-helper-method'
-    );
+            'v2board-plan-helper-method'
+        );
+    }
 
     file_put_contents($file, $code);
     echo "patched\n";
