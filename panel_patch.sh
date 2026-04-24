@@ -2,6 +2,7 @@
 set -euo pipefail
 
 TIMESTAMP=$(date +%Y%m%d_%H%M%S)
+declare -a EXCLUSIVE_CLIENT_FLAGS=()
 
 log() {
   printf '%s\n' "$*"
@@ -35,6 +36,45 @@ ask_yes_no() {
       n|no) return 1 ;;
       *) log '请输入 y 或 n。' ;;
     esac
+  done
+}
+
+trim_value() {
+  local value="$1"
+  value="${value#"${value%%[![:space:]]*}"}"
+  value="${value%"${value##*[![:space:]]}"}"
+  printf '%s' "$value"
+}
+
+prompt_exclusive_client_flags() {
+  local default_value='XBoardMihomo/1.0'
+  local answer normalized item
+  local -a raw_flags=()
+
+  while true; do
+    printf '请输入专用客户端 UA 或识别标识（多个用逗号分隔，留空使用默认 %s）: ' "$default_value"
+    read -r answer || true
+    if [ -z "$answer" ]; then
+      answer="$default_value"
+    fi
+
+    normalized="${answer//，/,}"
+    IFS=',' read -r -a raw_flags <<< "$normalized"
+    EXCLUSIVE_CLIENT_FLAGS=()
+
+    for item in "${raw_flags[@]}"; do
+      item=$(trim_value "$item")
+      [ -n "$item" ] || continue
+      EXCLUSIVE_CLIENT_FLAGS+=("$item")
+    done
+
+    if [ "${#EXCLUSIVE_CLIENT_FLAGS[@]}" -gt 0 ]; then
+      log "专用客户端识别标识：$(printf '%s' "${EXCLUSIVE_CLIENT_FLAGS[0]}")$(if [ "${#EXCLUSIVE_CLIENT_FLAGS[@]}" -gt 1 ]; then printf ' 等 %s 项' "${#EXCLUSIVE_CLIENT_FLAGS[@]}"; fi)"
+      log '后端按“不区分大小写的包含匹配”识别专用客户端请求。'
+      return
+    fi
+
+    log '至少需要输入一个专用客户端 UA 或识别标识。'
   done
 }
 
@@ -232,16 +272,29 @@ apply_patch_by_php() {
   local panel="$1"
   local target="$2"
   local file="$3"
+  local exclusive_flags_payload
 
-  php /dev/stdin "$panel" "$target" "$file" <<'PHP'
+  exclusive_flags_payload=$(printf '%s\n' "${EXCLUSIVE_CLIENT_FLAGS[@]}")
+
+  php /dev/stdin "$panel" "$target" "$file" "$exclusive_flags_payload" <<'PHP'
 <?php
 $panel = $argv[1] ?? '';
 $target = $argv[2] ?? '';
 $file = $argv[3] ?? '';
+$exclusiveFlagsRaw = $argv[4] ?? '';
 $code = @file_get_contents($file);
 if ($code === false) {
     fwrite(STDERR, "读取文件失败：{$file}\n");
     exit(1);
+}
+
+$exclusiveFlags = array_values(array_filter(
+    array_map(static fn($item) => trim($item), preg_split('/\r?\n/', $exclusiveFlagsRaw) ?: []),
+    static fn($item) => $item !== ''
+));
+
+if (count($exclusiveFlags) === 0) {
+    $exclusiveFlags = ['XBoardMihomo/1.0'];
 }
 
 function replace_once_or_fail(string $code, string $search, string $replace, string $label): string
@@ -265,9 +318,43 @@ function replace_once_or_fail(string $code, string $search, string $replace, str
     exit(2);
 }
 
+function escape_php_single_quoted(string $value): string
+{
+    return str_replace(["\\", "'"], ["\\\\", "\\'"], $value);
+}
+
+function build_exclusive_flags_code(array $flags): string
+{
+    $lines = array_map(
+        static fn($flag) => "        '" . escape_php_single_quoted($flag) . "',",
+        $flags
+    );
+    return implode("\n", $lines);
+}
+
+function inject_exclusive_flags(string $template, string $exclusiveFlagsCode): string
+{
+    return str_replace('__EXCLUSIVE_CLIENT_FLAGS__', $exclusiveFlagsCode, $template);
+}
+
+function replace_exclusive_flags_constant(string $code, string $exclusiveFlagsCode, string $label): string
+{
+    $replacement = "private const EXCLUSIVE_CLIENT_FLAGS = [\n{$exclusiveFlagsCode}\n    ];";
+    $result = preg_replace('/private const EXCLUSIVE_CLIENT_FLAGS = \[(?:.*?)\];/s', $replacement, $code, 1, $count);
+    if ($result === null || $count < 1) {
+        fwrite(STDERR, "未找到专用客户端标识常量：{$label}\n");
+        exit(2);
+    }
+    return $result;
+}
+
+$exclusiveFlagsCode = build_exclusive_flags_code($exclusiveFlags);
+
 if ($panel === 'v2board' && $target === 'controller') {
     if (strpos($code, 'private const EXCLUSIVE_CLIENT_FLAGS') !== false && strpos($code, '$protocolFlag = $flag;') !== false) {
-        echo "already_patched\n";
+        $code = replace_exclusive_flags_constant($code, $exclusiveFlagsCode, 'v2board-exclusive-flags');
+        file_put_contents($file, $code);
+        echo "patched\n";
         exit(0);
     }
 
@@ -278,7 +365,7 @@ class ClientController extends Controller
 {
     public function subscribe(Request $request)
 CODE,
-        <<<'CODE'
+        inject_exclusive_flags(<<<'CODE'
 class ClientController extends Controller
 {
     /**
@@ -286,7 +373,7 @@ class ClientController extends Controller
      * 只有匹配这些标识的客户端才能获取带 exclusive 标签的节点
      */
     private const EXCLUSIVE_CLIENT_FLAGS = [
-        'xboardmihomo',  // 专用客户端标识
+__EXCLUSIVE_CLIENT_FLAGS__
     ];
 
     /**
@@ -296,6 +383,7 @@ class ClientController extends Controller
 
     public function subscribe(Request $request)
 CODE,
+        $exclusiveFlagsCode),
         'v2board-class-header'
     );
 
@@ -423,7 +511,9 @@ CODE,
 
 if ($panel === 'xboard' && $target === 'controller') {
     if (strpos($code, 'private const EXCLUSIVE_CLIENT_FLAGS') !== false && strpos($code, 'ClashMeta::class') !== false) {
-        echo "already_patched\n";
+        $code = replace_exclusive_flags_constant($code, $exclusiveFlagsCode, 'xboard-exclusive-flags');
+        file_put_contents($file, $code);
+        echo "patched\n";
         exit(0);
     }
 
@@ -451,14 +541,14 @@ class ClientController extends Controller
     /**
      * Protocol prefix mapping for server names
 CODE,
-        <<<'CODE'
+        inject_exclusive_flags(<<<'CODE'
 class ClientController extends Controller
 {
     /**
      * 专用客户端标识
      */
     private const EXCLUSIVE_CLIENT_FLAGS = [
-        'xboardmihomo',
+__EXCLUSIVE_CLIENT_FLAGS__
     ];
 
     /**
@@ -469,6 +559,7 @@ class ClientController extends Controller
     /**
      * Protocol prefix mapping for server names
 CODE,
+        $exclusiveFlagsCode),
         'xboard-class-header'
     );
 
@@ -743,7 +834,9 @@ if ($panel === 'sspanel-malio' && $target === 'url') {
         strpos($code, 'public static function getVlessItem') !== false &&
         strpos($code, 'public static function getHy2Item') !== false
     ) {
-        echo "already_patched\n";
+        $code = replace_exclusive_flags_constant($code, $exclusiveFlagsCode, 'sspanel-url-exclusive-flags');
+        file_put_contents($file, $code);
+        echo "patched\n";
         exit(0);
     }
 
@@ -755,14 +848,14 @@ class URL
 {
     /*
 CODE,
-            <<<'CODE'
+            inject_exclusive_flags(<<<'CODE'
 class URL
 {
     /**
      * 专用客户端 UA 标识
      */
     private const EXCLUSIVE_CLIENT_FLAGS = [
-        'xboardmihomo',
+__EXCLUSIVE_CLIENT_FLAGS__
     ];
 
     /**
@@ -772,6 +865,7 @@ class URL
 
     /*
 CODE,
+            $exclusiveFlagsCode),
             'sspanel-url-class-header'
         );
     }
@@ -1291,6 +1385,7 @@ main() {
   require_php
   choose_panel
   choose_root "$PANEL_CHOICE"
+  prompt_exclusive_client_flags
   patch_project "$PANEL_CHOICE" "$ROOT_PATH"
 
   log ''
